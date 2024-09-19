@@ -5,7 +5,12 @@
 * [ENHANCEMENT]
 * [BUGFIX]
 
+* [FEATURE] Add sysctl collector #2425
 * [ENHANCEMENT] Add node_softirqs_total metric #2221
+* [ENHANCEMENT] Add device filter flags to arp collector #2254
+* [ENHANCEMENT] Add rapl zone name label option #2401
+* [ENHANCEMENT] Add slabinfo collector #1799
+* [BUGFIX] Sanitize rapl zone names #2299
 
 ## 1.3.1 / 2021-12-01
 
@@ -74,7 +79,7 @@ NOTE: Filesystem collector flags have been renamed. `--collector.filesystem.igno
 * [BUGFIX] Fix wrong value for OpenBSD memory buffer cache #2015
 * [BUGFIX] Only initiate collectors once #2048
 * [BUGFIX] Handle small backwards jumps in CPU idle #2067
-  
+
 ## 1.1.2 / 2021-03-05
 
 * [BUGFIX] Handle errors from disabled PSI subsystem #1983
