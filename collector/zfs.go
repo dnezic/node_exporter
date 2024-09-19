@@ -18,10 +18,9 @@ package collector
 
 import (
 	"errors"
+	"log/slog"
 	"strings"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -39,11 +38,11 @@ type zfsCollector struct {
 	linuxZpoolObjsetPath string
 	linuxZpoolStatePath  string
 	linuxPathMap         map[string]string
-	logger               log.Logger
+	logger               *slog.Logger
 }
 
 // NewZFSCollector returns a new Collector exposing ZFS statistics.
-func NewZFSCollector(logger log.Logger) (Collector, error) {
+func NewZFSCollector(logger *slog.Logger) (Collector, error) {
 	return &zfsCollector{
 		linuxProcpathBase:    "spl/kstat/zfs",
 		linuxZpoolIoPath:     "/*/io",
@@ -52,7 +51,7 @@ func NewZFSCollector(logger log.Logger) (Collector, error) {
 		linuxPathMap: map[string]string{
 			"zfs_abd":         "abdstats",
 			"zfs_arc":         "arcstats",
-			"zfs_dbuf":        "dbuf_stats",
+			"zfs_dbuf":        "dbufstats",
 			"zfs_dmu_tx":      "dmu_tx",
 			"zfs_dnode":       "dnodestats",
 			"zfs_fm":          "fm",
@@ -70,7 +69,7 @@ func (c *zfsCollector) Update(ch chan<- prometheus.Metric) error {
 
 	if _, err := c.openProcFile(c.linuxProcpathBase); err != nil {
 		if err == errZFSNotAvailable {
-			level.Debug(c.logger).Log("err", err)
+			c.logger.Debug(err.Error())
 			return ErrNoData
 		}
 	}
@@ -78,7 +77,7 @@ func (c *zfsCollector) Update(ch chan<- prometheus.Metric) error {
 	for subsystem := range c.linuxPathMap {
 		if err := c.updateZfsStats(subsystem, ch); err != nil {
 			if err == errZFSNotAvailable {
-				level.Debug(c.logger).Log("err", err)
+				c.logger.Debug(err.Error())
 				// ZFS /proc files are added as new features to ZFS arrive, it is ok to continue
 				continue
 			}
@@ -95,7 +94,7 @@ func (s zfsSysctl) metricName() string {
 	return strings.Replace(parts[len(parts)-1], "-", "_", -1)
 }
 
-func (c *zfsCollector) constSysctlMetric(subsystem string, sysctl zfsSysctl, value uint64) prometheus.Metric {
+func (c *zfsCollector) constSysctlMetric(subsystem string, sysctl zfsSysctl, value float64) prometheus.Metric {
 	metricName := sysctl.metricName()
 
 	return prometheus.MustNewConstMetric(
@@ -106,7 +105,7 @@ func (c *zfsCollector) constSysctlMetric(subsystem string, sysctl zfsSysctl, val
 			nil,
 		),
 		prometheus.UntypedValue,
-		float64(value),
+		value,
 	)
 }
 

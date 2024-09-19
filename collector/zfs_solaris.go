@@ -11,15 +11,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build solaris && !nozfs
-// +build solaris,!nozfs
+//go:build !nozfs
+// +build !nozfs
 
 package collector
 
 import (
+	"log/slog"
 	"strings"
 
-	"github.com/go-kit/log"
 	"github.com/illumos/go-kstat"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -54,7 +54,7 @@ type zfsCollector struct {
 	arcstatsSize                 *prometheus.Desc
 	zfetchstatsHits              *prometheus.Desc
 	zfetchstatsMisses            *prometheus.Desc
-	logger                       log.Logger
+	logger                       *slog.Logger
 }
 
 const (
@@ -65,7 +65,7 @@ func init() {
 	registerCollector("zfs", defaultEnabled, NewZfsCollector)
 }
 
-func NewZfsCollector(logger log.Logger) (Collector, error) {
+func NewZfsCollector(logger *slog.Logger) (Collector, error) {
 	return &zfsCollector{
 		abdstatsLinearCount: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, zfsCollectorSubsystem, "abdstats_linear_count_total"),

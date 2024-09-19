@@ -25,7 +25,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -35,14 +34,14 @@ const (
 	// kstatDataChar   = "0"
 	// kstatDataInt32  = "1"
 	// kstatDataUint32 = "2"
-	// kstatDataInt64  = "3"
+	kstatDataInt64  = "3"
 	kstatDataUint64 = "4"
 	// kstatDataLong   = "5"
 	// kstatDataUlong  = "6"
 	// kstatDataString = "7"
 )
 
-var zfsPoolStatesName = []string{"online", "degraded", "faulted", "offline", "removed", "unavail"}
+var zfsPoolStatesName = []string{"online", "degraded", "faulted", "offline", "removed", "unavail", "suspended"}
 
 func (c *zfsCollector) openProcFile(path string) (*os.File, error) {
 	file, err := os.Open(procFilePath(path))
@@ -50,7 +49,7 @@ func (c *zfsCollector) openProcFile(path string) (*os.File, error) {
 		// file not found error can occur if:
 		// 1. zfs module is not loaded
 		// 2. zfs version does not have the feature with metrics -- ok to ignore
-		level.Debug(c.logger).Log("msg", "Cannot open file for reading", "path", procFilePath(path))
+		c.logger.Debug("Cannot open file for reading", "path", procFilePath(path))
 		return nil, errZFSNotAvailable
 	}
 	return file, nil
@@ -63,8 +62,15 @@ func (c *zfsCollector) updateZfsStats(subsystem string, ch chan<- prometheus.Met
 	}
 	defer file.Close()
 
-	return c.parseProcfsFile(file, c.linuxPathMap[subsystem], func(s zfsSysctl, v uint64) {
-		ch <- c.constSysctlMetric(subsystem, s, v)
+	return c.parseProcfsFile(file, c.linuxPathMap[subsystem], func(s zfsSysctl, v interface{}) {
+		var valueAsFloat64 float64
+		switch value := v.(type) {
+		case int64:
+			valueAsFloat64 = float64(value)
+		case uint64:
+			valueAsFloat64 = float64(value)
+		}
+		ch <- c.constSysctlMetric(subsystem, s, valueAsFloat64)
 	})
 }
 
@@ -74,15 +80,11 @@ func (c *zfsCollector) updatePoolStats(ch chan<- prometheus.Metric) error {
 		return err
 	}
 
-	if zpoolPaths == nil {
-		return nil
-	}
-
 	for _, zpoolPath := range zpoolPaths {
 		file, err := os.Open(zpoolPath)
 		if err != nil {
 			// this file should exist, but there is a race where an exporting pool can remove the files -- ok to ignore
-			level.Debug(c.logger).Log("msg", "Cannot open file for reading", "path", zpoolPath)
+			c.logger.Debug("Cannot open file for reading", "path", zpoolPath)
 			return errZFSNotAvailable
 		}
 
@@ -104,7 +106,7 @@ func (c *zfsCollector) updatePoolStats(ch chan<- prometheus.Metric) error {
 		file, err := os.Open(zpoolPath)
 		if err != nil {
 			// This file should exist, but there is a race where an exporting pool can remove the files. Ok to ignore.
-			level.Debug(c.logger).Log("msg", "Cannot open file for reading", "path", zpoolPath)
+			c.logger.Debug("Cannot open file for reading", "path", zpoolPath)
 			return errZFSNotAvailable
 		}
 
@@ -123,7 +125,7 @@ func (c *zfsCollector) updatePoolStats(ch chan<- prometheus.Metric) error {
 	}
 
 	if zpoolStatePaths == nil {
-		level.Debug(c.logger).Log("msg", "No pool state files found")
+		c.logger.Debug("No pool state files found")
 		return nil
 	}
 
@@ -131,7 +133,7 @@ func (c *zfsCollector) updatePoolStats(ch chan<- prometheus.Metric) error {
 		file, err := os.Open(zpoolPath)
 		if err != nil {
 			// This file should exist, but there is a race where an exporting pool can remove the files. Ok to ignore.
-			level.Debug(c.logger).Log("msg", "Cannot open file for reading", "path", zpoolPath)
+			c.logger.Debug("Cannot open file for reading", "path", zpoolPath)
 			return errZFSNotAvailable
 		}
 
@@ -148,7 +150,7 @@ func (c *zfsCollector) updatePoolStats(ch chan<- prometheus.Metric) error {
 	return nil
 }
 
-func (c *zfsCollector) parseProcfsFile(reader io.Reader, fmtExt string, handler func(zfsSysctl, uint64)) error {
+func (c *zfsCollector) parseProcfsFile(reader io.Reader, fmtExt string, handler func(zfsSysctl, interface{})) error {
 	scanner := bufio.NewScanner(reader)
 
 	parseLine := false
@@ -167,11 +169,18 @@ func (c *zfsCollector) parseProcfsFile(reader io.Reader, fmtExt string, handler 
 
 		// kstat data type (column 2) should be KSTAT_DATA_UINT64, otherwise ignore
 		// TODO: when other KSTAT_DATA_* types arrive, much of this will need to be restructured
-		if parts[1] == kstatDataUint64 {
-			key := fmt.Sprintf("kstat.zfs.misc.%s.%s", fmtExt, parts[0])
+		key := fmt.Sprintf("kstat.zfs.misc.%s.%s", fmtExt, parts[0])
+		switch parts[1] {
+		case kstatDataUint64:
 			value, err := strconv.ParseUint(parts[2], 10, 64)
 			if err != nil {
-				return fmt.Errorf("could not parse expected integer value for %q", key)
+				return fmt.Errorf("could not parse expected unsigned integer value for %q: %w", key, err)
+			}
+			handler(zfsSysctl(key), value)
+		case kstatDataInt64:
+			value, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil {
+				return fmt.Errorf("could not parse expected signed integer value for %q: %w", key, err)
 			}
 			handler(zfsSysctl(key), value)
 		}

@@ -18,11 +18,11 @@ package collector
 
 import (
 	"fmt"
+	"log/slog"
 
-	"github.com/go-kit/log"
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/procfs/bcache"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 var (
@@ -36,12 +36,12 @@ func init() {
 // A bcacheCollector is a Collector which gathers metrics from Linux bcache.
 type bcacheCollector struct {
 	fs     bcache.FS
-	logger log.Logger
+	logger *slog.Logger
 }
 
 // NewBcacheCollector returns a newly allocated bcacheCollector.
 // It exposes a number of Linux bcache statistics.
-func NewBcacheCollector(logger log.Logger) (Collector, error) {
+func NewBcacheCollector(logger *slog.Logger) (Collector, error) {
 	fs, err := bcache.NewFS(*sysPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sysfs: %w", err)
@@ -134,14 +134,19 @@ func bcachePeriodStatsToMetric(ps *bcache.PeriodStats, labelValue string) []bcac
 			extraLabel:      label,
 			extraLabelValue: labelValue,
 		},
-		{
-			name:            "cache_readaheads_total",
-			desc:            "Count of times readahead occurred.",
-			value:           float64(ps.CacheReadaheads),
-			metricType:      prometheus.CounterValue,
-			extraLabel:      label,
-			extraLabelValue: labelValue,
-		},
+	}
+	if ps.CacheReadaheads != 0 {
+		bcacheReadaheadMetrics := []bcacheMetric{
+			{
+				name:            "cache_readaheads_total",
+				desc:            "Count of times readahead occurred.",
+				value:           float64(ps.CacheReadaheads),
+				metricType:      prometheus.CounterValue,
+				extraLabel:      label,
+				extraLabelValue: labelValue,
+			},
+		}
+		metrics = append(metrics, bcacheReadaheadMetrics...)
 	}
 	return metrics
 }

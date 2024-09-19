@@ -19,19 +19,17 @@ package collector
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type bondingCollector struct {
 	slaves, active typedDesc
-	logger         log.Logger
+	logger         *slog.Logger
 }
 
 func init() {
@@ -40,7 +38,7 @@ func init() {
 
 // NewBondingCollector returns a newly allocated bondingCollector.
 // It exposes the number of configured and active slave of linux bonding interfaces.
-func NewBondingCollector(logger log.Logger) (Collector, error) {
+func NewBondingCollector(logger *slog.Logger) (Collector, error) {
 	return &bondingCollector{
 		slaves: typedDesc{prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "bonding", "slaves"),
@@ -62,7 +60,7 @@ func (c *bondingCollector) Update(ch chan<- prometheus.Metric) error {
 	bondingStats, err := readBondingStats(statusfile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			level.Debug(c.logger).Log("msg", "Not collecting bonding, file does not exist", "file", statusfile)
+			c.logger.Debug("Not collecting bonding, file does not exist", "file", statusfile)
 			return ErrNoData
 		}
 		return err
@@ -76,21 +74,21 @@ func (c *bondingCollector) Update(ch chan<- prometheus.Metric) error {
 
 func readBondingStats(root string) (status map[string][2]int, err error) {
 	status = map[string][2]int{}
-	masters, err := ioutil.ReadFile(filepath.Join(root, "bonding_masters"))
+	masters, err := os.ReadFile(filepath.Join(root, "bonding_masters"))
 	if err != nil {
 		return nil, err
 	}
 	for _, master := range strings.Fields(string(masters)) {
-		slaves, err := ioutil.ReadFile(filepath.Join(root, master, "bonding", "slaves"))
+		slaves, err := os.ReadFile(filepath.Join(root, master, "bonding", "slaves"))
 		if err != nil {
 			return nil, err
 		}
 		sstat := [2]int{0, 0}
 		for _, slave := range strings.Fields(string(slaves)) {
-			state, err := ioutil.ReadFile(filepath.Join(root, master, fmt.Sprintf("lower_%s", slave), "bonding_slave", "mii_status"))
+			state, err := os.ReadFile(filepath.Join(root, master, fmt.Sprintf("lower_%s", slave), "bonding_slave", "mii_status"))
 			if errors.Is(err, os.ErrNotExist) {
 				// some older? kernels use slave_ prefix
-				state, err = ioutil.ReadFile(filepath.Join(root, master, fmt.Sprintf("slave_%s", slave), "bonding_slave", "mii_status"))
+				state, err = os.ReadFile(filepath.Join(root, master, fmt.Sprintf("slave_%s", slave), "bonding_slave", "mii_status"))
 			}
 			if err != nil {
 				return nil, err

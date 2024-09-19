@@ -20,14 +20,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"net"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"golang.org/x/sys/unix"
 )
 
-func getNetDevStats(filter *deviceFilter, logger log.Logger) (netDevStats, error) {
+func getNetDevStats(filter *deviceFilter, logger *slog.Logger) (netDevStats, error) {
 	netDev := netDevStats{}
 
 	ifs, err := net.Interfaces()
@@ -37,25 +36,28 @@ func getNetDevStats(filter *deviceFilter, logger log.Logger) (netDevStats, error
 
 	for _, iface := range ifs {
 		if filter.ignored(iface.Name) {
-			level.Debug(logger).Log("msg", "Ignoring device", "device", iface.Name)
+			logger.Debug("Ignoring device", "device", iface.Name)
 			continue
 		}
 
 		ifaceData, err := getIfaceData(iface.Index)
 		if err != nil {
-			level.Debug(logger).Log("msg", "failed to load data for interface", "device", iface.Name, "err", err)
+			logger.Debug("failed to load data for interface", "device", iface.Name, "err", err)
 			continue
 		}
 
 		netDev[iface.Name] = map[string]uint64{
 			"receive_packets":    ifaceData.Data.Ipackets,
 			"transmit_packets":   ifaceData.Data.Opackets,
-			"receive_errs":       ifaceData.Data.Ierrors,
-			"transmit_errs":      ifaceData.Data.Oerrors,
 			"receive_bytes":      ifaceData.Data.Ibytes,
 			"transmit_bytes":     ifaceData.Data.Obytes,
+			"receive_errors":     ifaceData.Data.Ierrors,
+			"transmit_errors":    ifaceData.Data.Oerrors,
+			"receive_dropped":    ifaceData.Data.Iqdrops,
 			"receive_multicast":  ifaceData.Data.Imcasts,
 			"transmit_multicast": ifaceData.Data.Omcasts,
+			"collisions":         ifaceData.Data.Collisions,
+			"noproto":            ifaceData.Data.Noproto,
 		}
 	}
 
@@ -87,6 +89,7 @@ type ifMsghdr2 struct {
 	Data      ifData64
 }
 
+// https://github.com/apple/darwin-xnu/blob/main/bsd/net/if_var.h#L199-L231
 type ifData64 struct {
 	Type       uint8
 	Typelen    uint8
@@ -113,4 +116,9 @@ type ifData64 struct {
 	Recvtiming uint32
 	Xmittiming uint32
 	Lastchange unix.Timeval32
+}
+
+func getNetDevLabels() (map[string]map[string]string, error) {
+	// to be implemented if needed
+	return nil, nil
 }

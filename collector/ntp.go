@@ -18,14 +18,14 @@ package collector
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/beevik/ntp"
-	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 const (
@@ -35,6 +35,7 @@ const (
 
 var (
 	ntpServer          = kingpin.Flag("collector.ntp.server", "NTP server to use for ntp collector").Default("127.0.0.1").String()
+	ntpServerPort      = kingpin.Flag("collector.ntp.server-port", "UDP port number to connect to on NTP server").Default("123").Int()
 	ntpProtocolVersion = kingpin.Flag("collector.ntp.protocol-version", "NTP protocol version").Default("4").Int()
 	ntpServerIsLocal   = kingpin.Flag("collector.ntp.server-is-local", "Certify that collector.ntp.server address is not a public ntp server").Default("false").Bool()
 	ntpIPTTL           = kingpin.Flag("collector.ntp.ip-ttl", "IP TTL to use while sending NTP query").Default("1").Int()
@@ -49,7 +50,7 @@ var (
 
 type ntpCollector struct {
 	stratum, leap, rtt, offset, reftime, rootDelay, rootDispersion, sanity typedDesc
-	logger                                                                 log.Logger
+	logger                                                                 *slog.Logger
 }
 
 func init() {
@@ -60,7 +61,7 @@ func init() {
 // Default definition of "local" is:
 // - collector.ntp.server address is a loopback address (or collector.ntp.server-is-mine flag is turned on)
 // - the server is reachable with outgoin IP_TTL = 1
-func NewNtpCollector(logger log.Logger) (Collector, error) {
+func NewNtpCollector(logger *slog.Logger) (Collector, error) {
 	ipaddr := net.ParseIP(*ntpServer)
 	if !*ntpServerIsLocal && (ipaddr == nil || !ipaddr.IsLoopback()) {
 		return nil, fmt.Errorf("only IP address of local NTP server is valid for --collector.ntp.server")
@@ -74,6 +75,11 @@ func NewNtpCollector(logger log.Logger) (Collector, error) {
 		return nil, fmt.Errorf("offset tolerance must be non-negative")
 	}
 
+	if *ntpServerPort < 1 || *ntpServerPort > 65535 {
+		return nil, fmt.Errorf("invalid NTP port number %d; must be between 1 and 65535 inclusive", *ntpServerPort)
+	}
+
+	logger.Warn("This collector is deprecated and will be removed in the next major version release.")
 	return &ntpCollector{
 		stratum: typedDesc{prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, ntpSubsystem, "stratum"),
@@ -124,6 +130,7 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 		Version: *ntpProtocolVersion,
 		TTL:     *ntpIPTTL,
 		Timeout: time.Second, // default `ntpdate` timeout
+		Port:    *ntpServerPort,
 	})
 	if err != nil {
 		return fmt.Errorf("couldn't get SNTP reply: %w", err)

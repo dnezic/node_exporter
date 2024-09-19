@@ -19,12 +19,11 @@ package collector
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/procfs/blockdevice"
 )
@@ -36,7 +35,7 @@ const (
 	// See also https://www.kernel.org/doc/Documentation/block/stat.txt
 	unixSectorSize = 512.0
 
-	diskstatsDefaultIgnoredDevices = "^(ram|loop|fd|(h|s|v|xv)d[a-z]|nvme\\d+n\\d+p)\\d+$"
+	diskstatsDefaultIgnoredDevices = "^(z?ram|loop|fd|(h|s|v|xv)d[a-z]|nvme\\d+n\\d+p)\\d+$"
 
 	// See udevadm(8).
 	udevDevicePropertyPrefix = "E:"
@@ -63,6 +62,7 @@ const (
 	udevIDRevision              = "ID_REVISION"
 	udevIDSerialShort           = "ID_SERIAL_SHORT"
 	udevIDWWN                   = "ID_WWN"
+	udevSCSIIdentSerial         = "SCSI_IDENT_SERIAL"
 )
 
 type typedFactorDesc struct {
@@ -84,7 +84,7 @@ type diskstatsCollector struct {
 	filesystemInfoDesc      typedFactorDesc
 	deviceMapperInfoDesc    typedFactorDesc
 	ataDescs                map[string]typedFactorDesc
-	logger                  log.Logger
+	logger                  *slog.Logger
 	getUdevDeviceProperties func(uint32, uint32) (udevInfo, error)
 }
 
@@ -94,7 +94,7 @@ func init() {
 
 // NewDiskstatsCollector returns a new Collector exposing disk device stats.
 // Docs from https://www.kernel.org/doc/Documentation/iostats.txt
-func NewDiskstatsCollector(logger log.Logger) (Collector, error) {
+func NewDiskstatsCollector(logger *slog.Logger) (Collector, error) {
 	var diskLabelNames = []string{"device"}
 	fs, err := blockdevice.NewFS(*procPath, *sysPath)
 	if err != nil {
@@ -261,7 +261,7 @@ func NewDiskstatsCollector(logger log.Logger) (Collector, error) {
 
 	// Only enable getting device properties from udev if the directory is readable.
 	if stat, err := os.Stat(*udevDataPath); err != nil || !stat.IsDir() {
-		level.Error(logger).Log("msg", "Failed to open directory, disabling udev device properties", "path", *udevDataPath)
+		logger.Error("Failed to open directory, disabling udev device properties", "path", *udevDataPath)
 	} else {
 		collector.getUdevDeviceProperties = getUdevDeviceProperties
 	}
@@ -283,7 +283,15 @@ func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
 
 		info, err := getUdevDeviceProperties(stats.MajorNumber, stats.MinorNumber)
 		if err != nil {
-			level.Debug(c.logger).Log("msg", "Failed to parse udev info", "err", err)
+			c.logger.Debug("Failed to parse udev info", "err", err)
+		}
+
+		// This is usually the serial printed on the disk label.
+		serial := info[udevSCSIIdentSerial]
+
+		// If it's undefined, fallback to ID_SERIAL_SHORT instead.
+		if serial == "" {
+			serial = info[udevIDSerialShort]
 		}
 
 		ch <- c.infoDesc.mustNewConstMetric(1.0, dev,
@@ -292,7 +300,7 @@ func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
 			info[udevIDPath],
 			info[udevIDWWN],
 			info[udevIDModel],
-			info[udevIDSerialShort],
+			serial,
 			info[udevIDRevision],
 		)
 
@@ -346,14 +354,14 @@ func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
 			for attr, desc := range c.ataDescs {
 				str, ok := info[attr]
 				if !ok {
-					level.Debug(c.logger).Log("msg", "Udev attribute does not exist", "attribute", attr)
+					c.logger.Debug("Udev attribute does not exist", "attribute", attr)
 					continue
 				}
 
 				if value, err := strconv.ParseFloat(str, 64); err == nil {
 					ch <- desc.mustNewConstMetric(value, dev)
 				} else {
-					level.Error(c.logger).Log("msg", "Failed to parse ATA value", "err", err)
+					c.logger.Error("Failed to parse ATA value", "err", err)
 				}
 			}
 		}

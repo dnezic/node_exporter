@@ -18,19 +18,17 @@ package collector
 
 import (
 	"fmt"
-	"io/ioutil"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
 var (
@@ -47,7 +45,7 @@ type textFileCollector struct {
 	path string
 	// Only set for testing to get predictable output.
 	mtime  *float64
-	logger log.Logger
+	logger *slog.Logger
 }
 
 func init() {
@@ -56,7 +54,7 @@ func init() {
 
 // NewTextFileCollector returns a new Collector exposing metrics read from files
 // in the given textfile directory.
-func NewTextFileCollector(logger log.Logger) (Collector, error) {
+func NewTextFileCollector(logger *slog.Logger) (Collector, error) {
 	c := &textFileCollector{
 		path:   *textFileDirectory,
 		logger: logger,
@@ -64,7 +62,7 @@ func NewTextFileCollector(logger log.Logger) (Collector, error) {
 	return c, nil
 }
 
-func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Metric, logger log.Logger) {
+func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Metric, logger *slog.Logger) {
 	var valType prometheus.ValueType
 	var val float64
 
@@ -80,7 +78,7 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 
 	for _, metric := range metricFamily.Metric {
 		if metric.TimestampMs != nil {
-			level.Warn(logger).Log("msg", "Ignoring unsupported custom timestamp on textfile collector metric", "metric", metric)
+			logger.Warn("Ignoring unsupported custom timestamp on textfile collector metric", "metric", metric)
 		}
 
 		labels := metric.GetLabel()
@@ -192,37 +190,76 @@ func (c *textFileCollector) Update(ch chan<- prometheus.Metric) error {
 	// Iterate over files and accumulate their metrics, but also track any
 	// parsing errors so an error metric can be reported.
 	var errored bool
+	var parsedFamilies []*dto.MetricFamily
+	metricsNamesToFiles := map[string][]string{}
+	metricsNamesToHelpTexts := map[string][2]string{}
 
 	paths, err := filepath.Glob(c.path)
 	if err != nil || len(paths) == 0 {
 		// not glob or not accessible path either way assume single
-		// directory and let ioutil.ReadDir handle it
+		// directory and let os.ReadDir handle it
 		paths = []string{c.path}
 	}
 
 	mtimes := make(map[string]time.Time)
 	for _, path := range paths {
-		files, err := ioutil.ReadDir(path)
+		files, err := os.ReadDir(path)
 		if err != nil && path != "" {
 			errored = true
-			level.Error(c.logger).Log("msg", "failed to read textfile collector directory", "path", path, "err", err)
+			c.logger.Error("failed to read textfile collector directory", "path", path, "err", err)
 		}
 
 		for _, f := range files {
+			metricsFilePath := filepath.Join(path, f.Name())
 			if !strings.HasSuffix(f.Name(), ".prom") {
 				continue
 			}
 
-			mtime, err := c.processFile(path, f.Name(), ch)
+			mtime, families, err := c.processFile(path, f.Name(), ch)
+
+			for _, mf := range families {
+				// Check for metrics with inconsistent help texts and take the first help text occurrence.
+				if helpTexts, seen := metricsNamesToHelpTexts[*mf.Name]; seen {
+					if mf.Help != nil && helpTexts[0] != *mf.Help || helpTexts[1] != "" {
+						metricsNamesToHelpTexts[*mf.Name] = [2]string{helpTexts[0], *mf.Help}
+						errored = true
+						c.logger.Error("inconsistent metric help text",
+							"metric", *mf.Name,
+							"original_help_text", helpTexts[0],
+							"new_help_text", *mf.Help,
+							// Only the first file path will be recorded in case of two or more inconsistent help texts.
+							"file", metricsNamesToFiles[*mf.Name][0])
+						continue
+					}
+				}
+				if mf.Help != nil {
+					metricsNamesToHelpTexts[*mf.Name] = [2]string{*mf.Help}
+				}
+				metricsNamesToFiles[*mf.Name] = append(metricsNamesToFiles[*mf.Name], metricsFilePath)
+				parsedFamilies = append(parsedFamilies, mf)
+			}
+
 			if err != nil {
 				errored = true
-				level.Error(c.logger).Log("msg", "failed to collect textfile data", "file", f.Name(), "err", err)
+				c.logger.Error("failed to collect textfile data", "file", f.Name(), "err", err)
 				continue
 			}
 
-			mtimes[filepath.Join(path, f.Name())] = *mtime
+			mtimes[metricsFilePath] = *mtime
 		}
 	}
+
+	for _, mf := range parsedFamilies {
+		if mf.Help == nil {
+			help := fmt.Sprintf("Metric read from %s", strings.Join(metricsNamesToFiles[*mf.Name], ", "))
+			mf.Help = &help
+		}
+	}
+
+	for _, mf := range parsedFamilies {
+		convertMetricFamily(mf, ch, c.logger)
+	}
+
 	c.exportMTimes(mtimes, ch)
 
 	// Export if there were errors.
@@ -244,44 +281,33 @@ func (c *textFileCollector) Update(ch chan<- prometheus.Metric) error {
 }
 
 // processFile processes a single file, returning its modification time on success.
-func (c *textFileCollector) processFile(dir, name string, ch chan<- prometheus.Metric) (*time.Time, error) {
+func (c *textFileCollector) processFile(dir, name string, ch chan<- prometheus.Metric) (*time.Time, map[string]*dto.MetricFamily, error) {
 	path := filepath.Join(dir, name)
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open textfile data file %q: %w", path, err)
+		return nil, nil, fmt.Errorf("failed to open textfile data file %q: %w", path, err)
 	}
 	defer f.Close()
 
 	var parser expfmt.TextParser
 	families, err := parser.TextToMetricFamilies(f)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse textfile data from %q: %w", path, err)
+		return nil, nil, fmt.Errorf("failed to parse textfile data from %q: %w", path, err)
 	}
 
 	if hasTimestamps(families) {
-		return nil, fmt.Errorf("textfile %q contains unsupported client-side timestamps, skipping entire file", path)
-	}
-
-	for _, mf := range families {
-		if mf.Help == nil {
-			help := fmt.Sprintf("Metric read from %s", path)
-			mf.Help = &help
-		}
-	}
-
-	for _, mf := range families {
-		convertMetricFamily(mf, ch, c.logger)
+		return nil, nil, fmt.Errorf("textfile %q contains unsupported client-side timestamps, skipping entire file", path)
 	}
 
 	// Only stat the file once it has been parsed and validated, so that
 	// a failure does not appear fresh.
 	stat, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat %q: %w", path, err)
+		return nil, families, fmt.Errorf("failed to stat %q: %w", path, err)
 	}
 
 	t := stat.ModTime()
-	return &t, nil
+	return &t, families, nil
 }
 
 // hasTimestamps returns true when metrics contain unsupported timestamps.

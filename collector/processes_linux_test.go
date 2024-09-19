@@ -17,11 +17,12 @@
 package collector
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 
-	"github.com/go-kit/log"
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/procfs"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
 func TestReadProcessStatus(t *testing.T) {
@@ -33,7 +34,7 @@ func TestReadProcessStatus(t *testing.T) {
 	if err != nil {
 		t.Errorf("failed to open procfs: %v", err)
 	}
-	c := processCollector{fs: fs, logger: log.NewNopLogger()}
+	c := processCollector{fs: fs, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	pids, states, threads, _, err := c.getAllocatedThreads()
 	if err != nil {
 		t.Fatalf("Cannot retrieve data from procfs getAllocatedThreads function: %v ", err)

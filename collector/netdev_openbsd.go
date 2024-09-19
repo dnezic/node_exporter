@@ -11,16 +11,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build openbsd && !amd64 && !nonetdev
-// +build openbsd,!amd64,!nonetdev
+//go:build !nonetdev && !amd64
+// +build !nonetdev,!amd64
 
 package collector
 
 import (
 	"errors"
-
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
+	"log/slog"
 )
 
 /*
@@ -31,7 +29,7 @@ import (
 */
 import "C"
 
-func getNetDevStats(filter *deviceFilter, logger log.Logger) (netDevStats, error) {
+func getNetDevStats(filter *deviceFilter, logger *slog.Logger) (netDevStats, error) {
 	netDev := netDevStats{}
 
 	var ifap, ifa *C.struct_ifaddrs
@@ -47,24 +45,33 @@ func getNetDevStats(filter *deviceFilter, logger log.Logger) (netDevStats, error
 
 		dev := C.GoString(ifa.ifa_name)
 		if filter.ignored(dev) {
-			level.Debug(logger).Log("msg", "Ignoring device", "device", dev)
+			logger.Debug("Ignoring device", "device", dev)
 			continue
 		}
 
 		data := (*C.struct_if_data)(ifa.ifa_data)
 
+		// https://github.com/openbsd/src/blob/master/sys/net/if.h#L101-L126
 		netDev[dev] = map[string]uint64{
 			"receive_packets":    uint64(data.ifi_ipackets),
 			"transmit_packets":   uint64(data.ifi_opackets),
-			"receive_errs":       uint64(data.ifi_ierrors),
-			"transmit_errs":      uint64(data.ifi_oerrors),
 			"receive_bytes":      uint64(data.ifi_ibytes),
 			"transmit_bytes":     uint64(data.ifi_obytes),
+			"receive_errors":     uint64(data.ifi_ierrors),
+			"transmit_errors":    uint64(data.ifi_oerrors),
+			"receive_dropped":    uint64(data.ifi_iqdrops),
+			"transmit_dropped":   uint64(data.ifi_oqdrops),
 			"receive_multicast":  uint64(data.ifi_imcasts),
 			"transmit_multicast": uint64(data.ifi_omcasts),
-			"receive_drop":       uint64(data.ifi_iqdrops),
+			"collisions":         uint64(data.ifi_collisions),
+			"noproto":            uint64(data.ifi_noproto),
 		}
 	}
 
 	return netDev, nil
+}
+
+func getNetDevLabels() (map[string]map[string]string, error) {
+	// to be implemented if needed
+	return nil, nil
 }

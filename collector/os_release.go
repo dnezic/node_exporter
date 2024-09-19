@@ -14,8 +14,10 @@
 package collector
 
 import (
+	"encoding/xml"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -23,15 +25,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	envparse "github.com/hashicorp/go-envparse"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
-	etcOSRelease    = "/etc/os-release"
-	usrLibOSRelease = "/usr/lib/os-release"
+	etcOSRelease       = "/etc/os-release"
+	usrLibOSRelease    = "/usr/lib/os-release"
+	systemVersionPlist = "/System/Library/CoreServices/SystemVersion.plist"
 )
 
 var (
@@ -51,18 +52,28 @@ type osRelease struct {
 	BuildID         string
 	ImageID         string
 	ImageVersion    string
+	SupportEnd      string
 }
 
 type osReleaseCollector struct {
 	infoDesc           *prometheus.Desc
-	logger             log.Logger
+	logger             *slog.Logger
 	os                 *osRelease
-	osFilename         string    // file name of cached release information
-	osMtime            time.Time // mtime of cached release file
-	osMutex            sync.Mutex
+	osMutex            sync.RWMutex
 	osReleaseFilenames []string // all os-release file names to check
 	version            float64
 	versionDesc        *prometheus.Desc
+	supportEnd         time.Time
+	supportEndDesc     *prometheus.Desc
+}
+
+type Plist struct {
+	Dict Dict `xml:"dict"`
+}
+
+type Dict struct {
+	Key    []string `xml:"key"`
+	String []string `xml:"string"`
 }
 
 func init() {
@@ -70,7 +81,7 @@ func init() {
 }
 
 // NewOSCollector returns a new Collector exposing os-release information.
-func NewOSCollector(logger log.Logger) (Collector, error) {
+func NewOSCollector(logger *slog.Logger) (Collector, error) {
 	return &osReleaseCollector{
 		logger: logger,
 		infoDesc: prometheus.NewDesc(
@@ -80,11 +91,16 @@ func NewOSCollector(logger log.Logger) (Collector, error) {
 			[]string{"build_id", "id", "id_like", "image_id", "image_version", "name", "pretty_name",
 				"variant", "variant_id", "version", "version_codename", "version_id"}, nil,
 		),
-		osReleaseFilenames: []string{etcOSRelease, usrLibOSRelease},
+		osReleaseFilenames: []string{etcOSRelease, usrLibOSRelease, systemVersionPlist},
 		versionDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "os", "version"),
 			"Metric containing the major.minor part of the OS version.",
 			[]string{"id", "id_like", "name"}, nil,
+		),
+		supportEndDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "os", "support_end_timestamp_seconds"),
+			"Metric containing the end-of-life date timestamp of the OS.",
+			nil, nil,
 		),
 	}, nil
 }
@@ -104,6 +120,7 @@ func parseOSRelease(r io.Reader) (*osRelease, error) {
 		BuildID:         env["BUILD_ID"],
 		ImageID:         env["IMAGE_ID"],
 		ImageVersion:    env["IMAGE_VERSION"],
+		SupportEnd:      env["SUPPORT_END"],
 	}, err
 }
 
@@ -114,29 +131,21 @@ func (c *osReleaseCollector) UpdateStruct(path string) error {
 	}
 	defer releaseFile.Close()
 
-	stat, err := releaseFile.Stat()
-	if err != nil {
-		return err
-	}
-
-	t := stat.ModTime()
-	if path == c.osFilename && t == c.osMtime {
-		// osReleaseCollector struct is already up-to-date.
-		return nil
-	}
-
 	// Acquire a lock to update the osReleaseCollector struct.
 	c.osMutex.Lock()
 	defer c.osMutex.Unlock()
 
-	level.Debug(c.logger).Log("msg", "file modification time has changed",
-		"file", path, "old_value", c.osMtime, "new_value", t)
-	c.osFilename = path
-	c.osMtime = t
-
-	c.os, err = parseOSRelease(releaseFile)
-	if err != nil {
-		return err
+	//  SystemVersion.plist is xml file with MacOs version info
+	if strings.Contains(releaseFile.Name(), "SystemVersion.plist") {
+		c.os, err = getMacosProductVersion(releaseFile.Name())
+		if err != nil {
+			return err
+		}
+	} else {
+		c.os, err = parseOSRelease(releaseFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	majorMinor := versionRegex.FindString(c.os.VersionID)
@@ -148,6 +157,15 @@ func (c *osReleaseCollector) UpdateStruct(path string) error {
 	} else {
 		c.version = 0
 	}
+
+	if c.os.SupportEnd != "" {
+		c.supportEnd, err = time.Parse(time.DateOnly, c.os.SupportEnd)
+
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -159,7 +177,7 @@ func (c *osReleaseCollector) Update(ch chan<- prometheus.Metric) error {
 		}
 		if errors.Is(err, os.ErrNotExist) {
 			if i >= (len(c.osReleaseFilenames) - 1) {
-				level.Debug(c.logger).Log("msg", "no os-release file found", "files", strings.Join(c.osReleaseFilenames, ","))
+				c.logger.Debug("no os-release file found", "files", strings.Join(c.osReleaseFilenames, ","))
 				return ErrNoData
 			}
 			continue
@@ -174,5 +192,42 @@ func (c *osReleaseCollector) Update(ch chan<- prometheus.Metric) error {
 		ch <- prometheus.MustNewConstMetric(c.versionDesc, prometheus.GaugeValue, c.version,
 			c.os.ID, c.os.IDLike, c.os.Name)
 	}
+
+	if c.os.SupportEnd != "" {
+		ch <- prometheus.MustNewConstMetric(c.supportEndDesc, prometheus.GaugeValue, float64(c.supportEnd.Unix()))
+	}
+
 	return nil
+}
+
+func getMacosProductVersion(filename string) (*osRelease, error) {
+	f, _ := os.Open(filename)
+	bytePlist, _ := io.ReadAll(f)
+	f.Close()
+
+	var plist Plist
+	err := xml.Unmarshal(bytePlist, &plist)
+	if err != nil {
+		return &osRelease{}, err
+	}
+
+	var osVersionID, osVersionName, osBuildID string
+	if len(plist.Dict.Key) > 0 {
+		for index, value := range plist.Dict.Key {
+			switch value {
+			case "ProductVersion":
+				osVersionID = plist.Dict.String[index]
+			case "ProductName":
+				osVersionName = plist.Dict.String[index]
+			case "ProductBuildVersion":
+				osBuildID = plist.Dict.String[index]
+			}
+		}
+	}
+	return &osRelease{
+		Name:      osVersionName,
+		Version:   osVersionID,
+		VersionID: osVersionID,
+		BuildID:   osBuildID,
+	}, nil
 }

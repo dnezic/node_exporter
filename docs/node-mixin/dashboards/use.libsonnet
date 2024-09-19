@@ -150,7 +150,8 @@ local diskSpaceUtilisation =
                              tags=($._config.dashboardTags),
                              timezone='utc',
                              refresh='30s',
-                             graphTooltip='shared_crosshair'
+                             graphTooltip='shared_crosshair',
+                             uid=std.md5('node-rsrc-use.json')
                            )
                            .addTemplate(datasourceTemplate)
                            .addTemplate($._clusterTemplate)
@@ -215,7 +216,8 @@ local diskSpaceUtilisation =
                              tags=($._config.dashboardTags),
                              timezone='utc',
                              refresh='30s',
-                             graphTooltip='shared_crosshair'
+                             graphTooltip='shared_crosshair',
+                             uid=std.md5('node-cluster-rsrc-use.json')
                            )
                            .addTemplate(datasourceTemplate)
                            .addTemplate($._clusterTemplate)
@@ -307,12 +309,12 @@ local diskSpaceUtilisation =
                                  |||
                                    sum without (device) (
                                      max without (fstype, mountpoint) ((
-                                       node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(clusterLabel)s="$cluster"}
+                                       node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(fsMountpointSelector)s, %(clusterLabel)s="$cluster"}
                                        -
-                                       node_filesystem_avail_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(clusterLabel)s="$cluster"}
+                                       node_filesystem_avail_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(fsMountpointSelector)s, %(clusterLabel)s="$cluster"}
                                      ) != 0)
                                    )
-                                   / scalar(sum(max without (fstype, mountpoint) (node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(clusterLabel)s="$cluster"})))
+                                   / scalar(sum(max without (fstype, mountpoint) (node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(fsMountpointSelector)s, %(clusterLabel)s="$cluster"})))
                                  ||| % $._config, legendFormat='{{instance}}'
                                ))
                              )
@@ -326,7 +328,8 @@ local diskSpaceUtilisation =
                              tags=($._config.dashboardTags),
                              timezone='utc',
                              refresh='30s',
-                             graphTooltip='shared_crosshair'
+                             graphTooltip='shared_crosshair',
+                             uid=std.md5('node-multicluster-rsrc-use.json')
                            )
                            .addTemplate(datasourceTemplate)
                            .addRow(
@@ -453,10 +456,10 @@ local diskSpaceUtilisation =
                                    sum (
                                      sum without (device) (
                                        max without (fstype, mountpoint, instance, pod) ((
-                                         node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s} - node_filesystem_avail_bytes{%(nodeExporterSelector)s, %(fsSelector)s}
+                                         node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(fsMountpointSelector)s} - node_filesystem_avail_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(fsMountpointSelector)s}
                                        ) != 0)
                                      )
-                                     / scalar(sum(max without (fstype, mountpoint) (node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s})))
+                                     / scalar(sum(max without (fstype, mountpoint) (node_filesystem_size_bytes{%(nodeExporterSelector)s, %(fsSelector)s, %(fsMountpointSelector)s})))
                                    ) by (%(clusterLabel)s)
                                  ||| % $._config, legendFormat='{{%(clusterLabel)s}}' % $._config
                                ))
